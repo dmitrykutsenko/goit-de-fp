@@ -4,7 +4,7 @@ from pyspark.sql.functions import (
     col,
     current_timestamp
 )
-
+from pyspark.sql.functions import split
 
 def main():
 
@@ -29,6 +29,14 @@ def main():
         athlete_bio_df
         .withColumn(
             "height",
+            split(col("height"), ",").getItem(0)
+        )
+        .withColumn(
+            "weight",
+            split(col("weight"), ",").getItem(0)
+        )
+        .withColumn(
+            "height",
             col("height").cast("double")
         )
         .withColumn(
@@ -36,6 +44,7 @@ def main():
             col("weight").cast("double")
         )
     )
+
 
     # Етап 3: відфільтрувати записи,
     # де зріст/вага відсутні

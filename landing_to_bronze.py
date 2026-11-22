@@ -18,7 +18,8 @@ def main(table_name):
         .option("multiLine", "true")
         .option("escape", "\"")
         .option("inferSchema", "true")
-        .csv(f"data/{table_name}.csv")
+        #.csv(f"data/{table_name}.csv")
+        .csv(f"/opt/airflow/project/data/{table_name}.csv")
     )
 
     # Вивід датафрейму для логів Airflow
