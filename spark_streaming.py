@@ -3,48 +3,50 @@ from pyspark.sql.functions import (
     col,
     from_json,
     avg,
-    current_timestamp
+    current_timestamp,
+    to_json,
+    struct
 )
+
 from pyspark.sql.types import (
     StructType,
     StructField,
     StringType,
-    LongType,
-    IntegerType
+    IntegerType,
+    LongType
 )
 
 # ==================================================
-# Етап 1: зчитування біологічних даних з MySQL
+# Налаштування
 # ==================================================
 
+MYSQL_URL = "jdbc:mysql://localhost:3306/olympic_dataset"
 MYSQL_USER = "airflow"
 MYSQL_PASSWORD = "airflow"
-MYSQL_HOST = "localhost"
-MYSQL_PORT = 3306
-MYSQL_DB = "olympic_dataset"
 
-JDBC_URL = (
-    f"jdbc:mysql://{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}"
-)
+INPUT_TOPIC = "athlete_event_results"
+OUTPUT_TOPIC = "athlete_analytics"
+
+# ==================================================
+# Spark Session
+# ==================================================
 
 spark = (
     SparkSession.builder
     .appName("OlympicStreamingPipeline")
-    #.config(
-    #    "spark.jars",
-    #    "mysql-connector-j-8.0.32.jar"
-    #)
-    .config(
-        "spark.jars",
-        "/mnt/c/Goit/goit-de-fp/mysql-connector-j-8.4.0.jar"
-    )
     .getOrCreate()
 )
+
+spark.sparkContext.setLogLevel("WARN")
+
+# ==================================================
+# Етап 1: зчитування athlete_bio з MySQL
+# ==================================================
 
 athlete_bio_df = (
     spark.read
     .format("jdbc")
-    .option("url", JDBC_URL)
+    .option("url", MYSQL_URL)
     .option("driver", "com.mysql.cj.jdbc.Driver")
     .option("dbtable", "athlete_bio")
     .option("user", MYSQL_USER)
@@ -53,19 +55,17 @@ athlete_bio_df = (
 )
 
 # ==================================================
-# Етап 2: фільтрація порожніх значень height/weight
+# Етап 2: фільтрація порожніх значень
 # ==================================================
 
-athlete_bio_df = athlete_bio_df.filter(
-    col("height").isNotNull()
-)
-
-athlete_bio_df = athlete_bio_df.filter(
-    col("weight").isNotNull()
+athlete_bio_df = (
+    athlete_bio_df
+    .filter(col("height").isNotNull())
+    .filter(col("weight").isNotNull())
 )
 
 # ==================================================
-# Етап 3: зчитування даних з Kafka-topic
+# Етап 3: схема повідомлень Kafka
 # ==================================================
 
 event_schema = StructType([
@@ -82,11 +82,15 @@ event_schema = StructType([
     StructField("isTeamSport", StringType())
 ])
 
+# ==================================================
+# Етап 3: читання Kafka
+# ==================================================
+
 kafka_df = (
     spark.readStream
     .format("kafka")
     .option("kafka.bootstrap.servers", "localhost:9092")
-    .option("subscribe", "athlete_event_results")
+    .option("subscribe", INPUT_TOPIC)
     .option("startingOffsets", "earliest")
     .load()
 )
@@ -104,17 +108,29 @@ events_df = (
 )
 
 # ==================================================
-# Етап 4: об'єднання даних через athlete_id
+# Етап 4: JOIN
 # ==================================================
 
-joined_df = events_df.join(
-    athlete_bio_df,
-    on="athlete_id",
-    how="inner"
+joined_df = (
+    events_df.alias("e")
+    .join(
+        athlete_bio_df.alias("b"),
+        on="athlete_id",
+        how="inner"
+    )
+    .select(
+        col("athlete_id"),
+        col("sport"),
+        col("medal"),
+        col("sex"),
+        col("height"),
+        col("weight"),
+        col("b.country_noc").alias("country_noc")
+    )
 )
 
 # ==================================================
-# Етап 5: розрахунок середнього зросту та ваги
+# Етап 5: агрегація
 # ==================================================
 
 result_df = (
@@ -136,25 +152,36 @@ result_df = (
 )
 
 # ==================================================
-# Етап 6: запис результатів у Kafka та MySQL
+# Етап 6: foreachBatch
 # ==================================================
 
 def foreach_batch_function(batch_df, batch_id):
 
-    print(f"Обробка batch_id={batch_id}")
+    print(f"\n=== Batch {batch_id} ===\n")
+
+    if batch_df.isEmpty():
+        return
+
+    batch_df.show(
+        20,
+        truncate=False
+    )
 
     # ----------------------------------------------
-    # Етап 6.а): запис у вихідний Kafka-топік
+    # Етап 6.a): запис у Kafka
     # ----------------------------------------------
 
     kafka_output_df = (
-        batch_df.selectExpr(
-            "to_json(struct(*)) AS value"
+        batch_df.select(
+            to_json(
+                struct("*")
+            ).alias("value")
         )
     )
 
     (
-        kafka_output_df.write
+        kafka_output_df
+        .write
         .format("kafka")
         .option(
             "kafka.bootstrap.servers",
@@ -162,7 +189,7 @@ def foreach_batch_function(batch_df, batch_id):
         )
         .option(
             "topic",
-            "athlete_analytics"
+            OUTPUT_TOPIC
         )
         .save()
     )
@@ -174,15 +201,9 @@ def foreach_batch_function(batch_df, batch_id):
     (
         batch_df.write
         .format("jdbc")
-        .option("url", JDBC_URL)
-        .option(
-            "driver",
-            "com.mysql.cj.jdbc.Driver"
-        )
-        .option(
-            "dbtable",
-            "athlete_analytics"
-        )
+        .option("url", MYSQL_URL)
+        .option("driver", "com.mysql.cj.jdbc.Driver")
+        .option("dbtable", "athlete_analytics")
         .option("user", MYSQL_USER)
         .option("password", MYSQL_PASSWORD)
         .mode("append")
@@ -196,15 +217,6 @@ def foreach_batch_function(batch_df, batch_id):
 query = (
     result_df.writeStream
     .outputMode("complete")
-    ###
-    debug_query = (
-        result_df.writeStream
-        .outputMode("complete")
-        .format("console")
-        .option("truncate", False)
-        .start()
-    )
-    ###
     .foreachBatch(foreach_batch_function)
     .start()
 )
