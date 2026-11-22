@@ -14,7 +14,7 @@ services:
     restart: always
 
   airflow-init:
-    image: apache/airflow:3.4.0
+    image: apache/airflow:2.10.5
     depends_on:
       postgres:
         condition: service_healthy
@@ -27,7 +27,7 @@ services:
     command: db migrate
 
   airflow-apiserver:
-    image: apache/airflow:3.4.0
+    image: apache/airflow:2.10.5
     restart: always
     command: api-server
     depends_on:
@@ -45,7 +45,7 @@ services:
       - ./:/opt/airflow/project
 
   airflow-scheduler:
-    image: apache/airflow:3.4.0
+    image: apache/airflow:2.10.5
     restart: always
     command: scheduler
     depends_on:
